@@ -9,3 +9,5 @@ package-lock.json
 
 # Logs
 *.log
+Config.gs
+config.gs
