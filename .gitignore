@@ -1,0 +1,11 @@
+# Clasp
+.clasp.json
+build/
+
+# Credentials and Config
+config.js
+node_modules/
+package-lock.json
+
+# Logs
+*.log
