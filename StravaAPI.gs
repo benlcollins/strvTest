@@ -5,11 +5,13 @@
 /**
  * Fetches recent activities from Strava for the authenticated athlete.
  * 
+ * @param {number} page - The page number to fetch (default: 1).
+ * @param {number} perPage - Number of items per page (default: 30).
  * @return {Array} List of activity objects.
  */
-function fetchActivities() {
+function fetchActivities(page = 1, perPage = 30) {
   const token = getAccessToken();
-  const url = 'https://www.strava.com/api/v3/athlete/activities?per_page=30'; // Fetch last 30 activities
+  const url = `https://www.strava.com/api/v3/athlete/activities?page=${page}&per_page=${perPage}`;
   
   const options = {
     headers: {
