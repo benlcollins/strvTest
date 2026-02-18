@@ -17,9 +17,9 @@ const HEADERS = [
   'Calories',
   'Description',
   'Temp (C)',
-  'Achievement Count', // New
-  'Kudos Count', // New
-  'Comment Count', // New
+  'Achievement Count', 
+  'Kudos Count', 
+  'Comment Count', 
   'Bike', 
   'Shoes', 
   'Results',
@@ -47,7 +47,7 @@ function debugActivityJSON() {
   
   const activities = fetchActivities(1, 1); 
   if (!activities || activities.length === 0) {
-    SpreadsheetApp.getUi().alert("No activities found.");
+    alertUser("No activities found.");
     return;
   }
   
@@ -55,7 +55,7 @@ function debugActivityJSON() {
   const detail = fetchActivityDetails(activityId); 
   
   if (!detail) {
-    SpreadsheetApp.getUi().alert("Failed to fetch details.");
+    alertUser("Failed to fetch details.");
     return;
   }
   
@@ -80,11 +80,12 @@ function debugActivityJSON() {
   }
   
   SpreadsheetApp.setActiveSheet(debugSheet);
-  SpreadsheetApp.getUi().alert(`Debug JSON (filtered) written to 'Debug' sheet.`);
+  alertUser(`Debug JSON (filtered) written to 'Debug' sheet.`);
 }
 
 /**
  * Initiates the sync process. Managed via Triggers.
+ * Handles rate limits by pausing execution without losing place.
  */
 function runBatchSync() {
   const props = PropertiesService.getScriptProperties();
@@ -92,39 +93,77 @@ function runBatchSync() {
   
   console.log(`Starting batch sync for page ${currentPage}`);
   
-  const activities = fetchActivities(currentPage, BATCH_SIZE);
-  
-  if (!activities || activities.length === 0) {
-    console.log('No more activities found. Sync complete.');
-    props.deleteProperty('SYNC_CURSOR_PAGE');
-    deleteTrigger('runBatchSync');
-    SpreadsheetApp.getUi().alert('Sync Complete!');
-    return;
-  }
-  
-  const newRows = processActivities(activities);
-  
-  if (newRows > 0) {
+  try {
+    const activities = fetchActivities(currentPage, BATCH_SIZE);
+    
+    if (!activities || activities.length === 0) {
+      console.log('No more activities found. Sync complete.');
+      props.deleteProperty('SYNC_CURSOR_PAGE');
+      deleteTrigger('runBatchSync');
+      alertUser('Sync Complete!');
+      return;
+    }
+    
+    const newRows = processActivities(activities);
+    
+    // Success: Move to next page
     console.log(`Processed page ${currentPage}. Moving to next page.`);
     props.setProperty('SYNC_CURSOR_PAGE', String(currentPage + 1));
+    
+    // Schedule next batch
     createTrigger('runBatchSync', 10); 
-    SpreadsheetApp.getUi().alert(`Batch ${currentPage} complete. Next batch scheduled in 10 mins.`);
-  } else {
-    console.log(`Page ${currentPage} processed (all duplicates?). Moving to next page.`);
-    props.setProperty('SYNC_CURSOR_PAGE', String(currentPage + 1));
-    createTrigger('runBatchSync', 10);
+    alertUser(`Batch ${currentPage} complete. Next batch scheduled in 10 mins.`);
+
+  } catch (e) {
+    if (e.message === 'RATE_LIMIT_EXCEEDED') {
+      console.warn('Rate Limit Exceeded. Stopping sync to preserve quota.');
+      console.warn(`Current Page Cursor preserved at: ${currentPage}`);
+      
+      // Do NOT delete the cursor property, so user can resume later.
+      // Do NOT schedule a trigger, as we need to wait for quota reset (likely next day).
+      deleteTrigger('runBatchSync');
+      alertUser('Rate Limit Hit. Sync stopped. Please retry in 24 hours. Your place has been saved.');
+      
+    } else {
+      console.error('Unexpected error in runBatchSync: ' + e);
+      // For other errors, we might want to stop too
+      deleteTrigger('runBatchSync');
+      alertUser('Error during sync: ' + e);
+    }
   }
 }
 
 function testSync() {
   console.log('Starting Test Sync...');
-  const activities = fetchActivities(1, 5); 
-  
-  if (activities && activities.length > 0) {
-    const count = processActivities(activities);
-    SpreadsheetApp.getUi().alert(`Test Sync Complete. Processed ${count} new activities.`);
-  } else {
-    SpreadsheetApp.getUi().alert('Test Sync: No activities found.');
+  try {
+    const activities = fetchActivities(1, 5); 
+    
+    if (activities && activities.length > 0) {
+      const count = processActivities(activities);
+      alertUser(`Test Sync Complete. Processed ${count} new activities.`);
+    } else {
+      alertUser('Test Sync: No activities found.');
+    }
+  } catch (e) {
+    alertUser('Test Sync Error: ' + e);
+  }
+}
+
+/**
+ * Helper to safely alert the user.
+ * swallows alerts if running in background (TimeBased trigger).
+ */
+function alertUser(message) {
+  try {
+    // Check if we can access UI (we can't in time-based triggers)
+    // There isn't a direct "Am I in trigger?" check, but getUi() throws if not available?
+    // actually, DocumentApp.getUi() / SpreadsheetApp.getUi() implies bound script active user.
+    // Better way: Check if we have an active user context? 
+    // Usually catching the exception is the way.
+    SpreadsheetApp.getUi().alert(message);
+  } catch (e) {
+    // We are likely in a background trigger
+    console.log(`[Background Alert]: ${message}`);
   }
 }
 
@@ -138,7 +177,6 @@ function processActivities(activities) {
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(TARGET_SHEET_NAME);
   if (!sheet) return 0;
   
-  // Update header check to match new length if needed, or user clears sheet
   if (sheet.getLastRow() === 0) {
     sheet.appendRow(HEADERS);
   }
@@ -182,7 +220,6 @@ function processActivities(activities) {
     const temp = activity.average_temp || '';
     const desc = activity.description || '';
     
-    // Counts
     const achieveCount = activity.achievement_count || 0;
     const kudosCount = activity.kudos_count || 0;
     const commentCount = activity.comment_count || 0;
@@ -238,9 +275,9 @@ function processActivities(activities) {
       activity.calories || '',
       desc,
       temp,
-      achieveCount, // New
-      kudosCount, // New
-      commentCount, // New
+      achieveCount, 
+      kudosCount, 
+      commentCount, 
       bike,
       shoes,
       results,

@@ -11,10 +11,15 @@
 function getAccessToken() {
   const props = PropertiesService.getScriptProperties();
   const token = props.getProperty('access_token');
+  const expiresAt = parseInt(props.getProperty('expires_at') || '0');
   
-  if (token) {
+  // Check if token exists AND is valid (with 5-minute buffer)
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  
+  if (token && expiresAt > (nowSeconds + 300)) {
     return token;
   } else {
+    console.log('Access token missing or expired. Refreshing...');
     return refreshAccessToken();
   }
 }
@@ -44,7 +49,14 @@ function refreshAccessToken() {
     const data = JSON.parse(response.getContentText());
     
     if (data.access_token) {
-      PropertiesService.getScriptProperties().setProperty('access_token', data.access_token);
+      const props = PropertiesService.getScriptProperties();
+      props.setProperty('access_token', data.access_token);
+      
+      // Store expiration time if provided
+      if (data.expires_at) {
+        props.setProperty('expires_at', String(data.expires_at));
+      }
+      
       return data.access_token;
     } else {
       console.error('Error refreshing token: ' + JSON.stringify(data));

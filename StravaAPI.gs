@@ -16,14 +16,29 @@ function fetchActivities(page = 1, perPage = 30) {
   const options = {
     headers: {
       'Authorization': 'Bearer ' + token
-    }
+    },
+    muteHttpExceptions: true // We need to check status code manually
   };
   
   try {
-    const response = UrlFetchApp.fetch(url, options); 
+    const response = UrlFetchApp.fetch(url, options);
+    const code = response.getResponseCode();
+    
+    if (code === 429) {
+      throw new Error('RATE_LIMIT_EXCEEDED');
+    }
+    
+    if (code !== 200) {
+      console.error(`Error fetching activities. Code: ${code}. Response: ${response.getContentText()}`);
+      return [];
+    }
+    
     return JSON.parse(response.getContentText());
   } catch (e) {
-    console.error('Error fetching activities: ' + e);
+    // Re-throw if it's our specific rate limit error
+    if (e.message === 'RATE_LIMIT_EXCEEDED') throw e;
+    
+    console.error('Exception fetching activities: ' + e);
     return [];
   }
 }
@@ -64,6 +79,13 @@ function fetchActivitiesDetailsParallel(activityIds) {
     const responses = UrlFetchApp.fetchAll(requests);
     const results = {};
     
+    // Check for rate limits in any of the responses
+    for (const r of responses) {
+      if (r.getResponseCode() === 429) {
+        throw new Error('RATE_LIMIT_EXCEEDED');
+      }
+    }
+    
     // Process responses in pairs (Details, Photos)
     for (let i = 0; i < activityIds.length; i++) {
       const id = activityIds[i];
@@ -97,6 +119,7 @@ function fetchActivitiesDetailsParallel(activityIds) {
     
     return results;
   } catch (e) {
+    if (e.message === 'RATE_LIMIT_EXCEEDED') throw e;
     console.error('Error in parallel fetch: ' + e);
     return {};
   }
