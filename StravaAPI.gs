@@ -7,7 +7,7 @@
  * 
  * @param {number} page - The page number to fetch (default: 1).
  * @param {number} perPage - Number of items per page (default: 30).
- * @return {Array} List of activity objects.
+ * @return {Array} List of activity summary objects.
  */
 function fetchActivities(page = 1, perPage = 30) {
   const token = getAccessToken();
@@ -20,7 +20,7 @@ function fetchActivities(page = 1, perPage = 30) {
   };
   
   try {
-    const response = UrlFetchApp.fetch(url, options); // Using UrlFetchApp as per spec
+    const response = UrlFetchApp.fetch(url, options); 
     return JSON.parse(response.getContentText());
   } catch (e) {
     console.error('Error fetching activities: ' + e);
@@ -29,41 +29,88 @@ function fetchActivities(page = 1, perPage = 30) {
 }
 
 /**
- * Fetches photos for a specific activity.
+ * Fetches detailed activity data and photos for multiple activities in parallel.
+ * This optimizes performance by batching requests.
  * 
- * @param {number} activityId - The ID of the activity.
- * @return {string|null} The URL of the primary photo, or null if none found.
+ * @param {Array<string>} activityIds - List of activity IDs to fetch.
+ * @return {Object} Map where key is activityId and value is an object { details: Object, photos: Array }.
  */
-function fetchActivityPhotos(activityId) {
-  const token = getAccessToken();
-  // Ensure we get the high-res photo if available, though endpoint usually returns list
-  const url = `https://www.strava.com/api/v3/activities/${activityId}/photos?size=5000`; 
+function fetchActivitiesDetailsParallel(activityIds) {
+  if (!activityIds || activityIds.length === 0) return {};
   
-  const options = {
-    headers: {
-      'Authorization': 'Bearer ' + token
-    }
-  };
+  const token = getAccessToken();
+  const requests = [];
+  
+  // Create request objects for both Details and Photos for each activity
+  activityIds.forEach(id => {
+    // 1. Details Request
+    requests.push({
+      url: `https://www.strava.com/api/v3/activities/${id}?include_all_efforts=true`,
+      method: 'get',
+      headers: { 'Authorization': 'Bearer ' + token },
+      muteHttpExceptions: true
+    });
+    
+    // 2. Photos Request
+    requests.push({
+      url: `https://www.strava.com/api/v3/activities/${id}/photos?size=5000`,
+      method: 'get',
+      headers: { 'Authorization': 'Bearer ' + token },
+      muteHttpExceptions: true
+    });
+  });
   
   try {
-    const response = UrlFetchApp.fetch(url, options);
-    const photos = JSON.parse(response.getContentText());
+    const responses = UrlFetchApp.fetchAll(requests);
+    const results = {};
     
-    if (photos && photos.length > 0) {
-      // Return the first photo's URL. Prefer 'approx_width' > 0 if structure varies,
-      // but standard response has urls property. 
-      // Strava photo object structure: { urls: { "100": "...", "600": "..." } }
-      // We want the largest available.
-      const photo = photos[0];
-      if (photo.urls) {
-        // Get the largest size available key
-        const sizes = Object.keys(photo.urls).sort((a, b) => Number(b) - Number(a));
-        return photo.urls[sizes[0]];
+    // Process responses in pairs (Details, Photos)
+    for (let i = 0; i < activityIds.length; i++) {
+      const id = activityIds[i];
+      const detailsResp = responses[i * 2];
+      const photosResp = responses[i * 2 + 1];
+      
+      let details = null;
+      let photos = [];
+      
+      if (detailsResp.getResponseCode() === 200) {
+        details = JSON.parse(detailsResp.getContentText());
+      } else {
+        console.error(`Error fetching details for ${id}: ${detailsResp.getResponseCode()}`);
       }
+      
+      if (photosResp.getResponseCode() === 200) {
+        const photoData = JSON.parse(photosResp.getContentText());
+        if (photoData && Array.isArray(photoData)) {
+           photos = photoData.map(p => {
+             if (p.urls) {
+               const sizes = Object.keys(p.urls).sort((a, b) => Number(b) - Number(a));
+               return p.urls[sizes[0]];
+             }
+             return null;
+           }).filter(url => url !== null);
+        }
+      }
+      
+      results[id] = { details, photos };
     }
-    return null;
+    
+    return results;
   } catch (e) {
-    console.error(`Error fetching photos for activity ${activityId}: ` + e);
-    return null;
+    console.error('Error in parallel fetch: ' + e);
+    return {};
   }
+}
+
+/**
+ * Kept for backward compatibility or single testing.
+ */
+function fetchActivityDetails(activityId) {
+  const result = fetchActivitiesDetailsParallel([activityId]);
+  return result[activityId] ? result[activityId].details : null;
+}
+
+function fetchActivityPhotos(activityId) {
+  const result = fetchActivitiesDetailsParallel([activityId]);
+  return result[activityId] ? result[activityId].photos : [];
 }
