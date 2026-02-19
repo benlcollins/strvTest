@@ -23,7 +23,8 @@ const HEADERS = [
   'Bike', 
   'Shoes', 
   'Results',
-  'Photos'
+  'Photos',
+  'Strava Link'
 ];
 
 /**
@@ -87,46 +88,63 @@ function debugActivityJSON() {
  * Initiates the sync process. Managed via Triggers.
  * Handles rate limits by pausing execution without losing place.
  */
+/**
+ * Initiates the sync process. Managed via Triggers.
+ * Optimized to skip through existing activities efficiently.
+ */
 function runBatchSync() {
   const props = PropertiesService.getScriptProperties();
   let currentPage = parseInt(props.getProperty('SYNC_CURSOR_PAGE')) || 1;
+  const MAX_PAGES_PER_EXEC = 8; 
   
-  console.log(`Starting batch sync for page ${currentPage}`);
+  console.log(`Starting batch sync starting at page ${currentPage}`);
   
   try {
-    const activities = fetchActivities(currentPage, BATCH_SIZE);
-    
-    if (!activities || activities.length === 0) {
-      console.log('No more activities found. Sync complete.');
-      props.deleteProperty('SYNC_CURSOR_PAGE');
-      deleteTrigger('runBatchSync');
-      alertUser('Sync Complete!');
-      return;
+    let pagesProcessedInThisRun = 0;
+    let totalNewActivitiesFound = 0;
+
+    while (pagesProcessedInThisRun < MAX_PAGES_PER_EXEC) {
+      console.log(`Fetching page ${currentPage} (Batch Size: ${BATCH_SIZE})...`);
+      const activities = fetchActivities(currentPage, BATCH_SIZE);
+      
+      if (!activities || activities.length === 0) {
+        console.log('No more activities found from API. Sync complete.');
+        props.deleteProperty('SYNC_CURSOR_PAGE');
+        deleteTrigger('runBatchSync');
+        alertUser('Sync Complete! No more history found on Strava.');
+        return;
+      }
+      
+      const count = processActivities(activities);
+      totalNewActivitiesFound += count;
+      pagesProcessedInThisRun++;
+      currentPage++; 
+
+      if (count > 0) {
+        console.log(`Found ${count} new activities. Stopping loop to process next batch.`);
+        break;
+      } else {
+        console.log(`Page ${currentPage - 1} skipped (Duplicates).`);
+      }
     }
     
-    const newRows = processActivities(activities);
+    props.setProperty('SYNC_CURSOR_PAGE', String(currentPage));
+    const waitTime = (totalNewActivitiesFound === 0) ? 1 : 10;
+    createTrigger('runBatchSync', waitTime); 
     
-    // Success: Move to next page
-    console.log(`Processed page ${currentPage}. Moving to next page.`);
-    props.setProperty('SYNC_CURSOR_PAGE', String(currentPage + 1));
+    const msg = (totalNewActivitiesFound === 0) 
+      ? `Skipped ${pagesProcessedInThisRun} pages of history. Continuing in 1 min...`
+      : `Added ${totalNewActivitiesFound} new activities. Next batch in 10 mins.`;
     
-    // Schedule next batch
-    createTrigger('runBatchSync', 10); 
-    alertUser(`Batch ${currentPage} complete. Next batch scheduled in 10 mins.`);
+    alertUser(msg);
 
   } catch (e) {
     if (e.message === 'RATE_LIMIT_EXCEEDED') {
-      console.warn('Rate Limit Exceeded. Stopping sync to preserve quota.');
-      console.warn(`Current Page Cursor preserved at: ${currentPage}`);
-      
-      // Do NOT delete the cursor property, so user can resume later.
-      // Do NOT schedule a trigger, as we need to wait for quota reset (likely next day).
+      console.warn('Rate Limit Hit. Sync paused.');
       deleteTrigger('runBatchSync');
-      alertUser('Rate Limit Hit. Sync stopped. Please retry in 24 hours. Your place has been saved.');
-      
+      alertUser('Rate Limit Hit. Sync paused for 24 hours. Cursor saved.');
     } else {
-      console.error('Unexpected error in runBatchSync: ' + e);
-      // For other errors, we might want to stop too
+      console.error('Error in runBatchSync: ' + e);
       deleteTrigger('runBatchSync');
       alertUser('Error during sync: ' + e);
     }
@@ -169,9 +187,7 @@ function alertUser(message) {
 
 /**
  * Helper to process a list of activities and write valid ones to sheet.
- * Uses PARALLEL fetching for speed.
- * @param {Array} activities - Summary activity objects
- * @return {number} Count of new rows added.
+ * Uses DYNAMIC COLUMN MAPPING for robustness.
  */
 function processActivities(activities) {
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(TARGET_SHEET_NAME);
@@ -182,9 +198,29 @@ function processActivities(activities) {
   }
 
   const lastRow = sheet.getLastRow();
+  const lastCol = sheet.getLastColumn();
+  const rawHeaders = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  
+  // Create a map of Header Name -> Column Index (0-based)
+  const headerMap = {};
+  rawHeaders.forEach((h, i) => headerMap[h.trim()] = i);
+
+  // Determine Activity ID column
+  const idColIndex = headerMap['Activity ID'];
+  if (idColIndex === undefined) {
+    console.error("Critical Error: 'Activity ID' column not found.");
+    return 0;
+  }
+
+  // Determine Link column (Handle user's 'URL ID' or our 'Strava Link')
+  let linkColIndex = headerMap['Strava Link'];
+  if (linkColIndex === undefined) linkColIndex = headerMap['URL ID'];
+  
+  // If still missing, we will add it later if we have new rows
+  
   let existingIds = [];
   if (lastRow > 1) {
-    const values = sheet.getRange(2, 1, lastRow - 1, 1).getValues(); 
+    const values = sheet.getRange(2, idColIndex + 1, lastRow - 1, 1).getValues(); 
     existingIds = values.flat().map(String);
   }
 
@@ -195,7 +231,7 @@ function processActivities(activities) {
   }
 
   const activityIds = newActivities.map(a => a.id);
-  console.log(`Fetching details for ${activityIds.length} activities in parallel...`);
+  console.log(`Fetching details for ${activityIds.length} activities...`);
   const detailedDataMap = fetchActivitiesDetailsParallel(activityIds);
   
   const newRows = [];
@@ -205,90 +241,73 @@ function processActivities(activities) {
     const activity = data && data.details ? data.details : summary;
     const photoUrls = data ? data.photos : [];
     
-    let photosCell = '';
-    if (photoUrls.length > 0) {
-      photosCell = photoUrls.join(', \n');
-    }
-
-    const distanceMi = (activity.distance * 0.000621371).toFixed(2);
-    const elevationFt = activity.total_elevation_gain ? (activity.total_elevation_gain * 3.28084).toFixed(0) : 0;
-    const movingTime = formatTime(activity.moving_time);
-    const elapsedTime = formatTime(activity.elapsed_time);
-    const maxSpeedMph = (activity.max_speed * 2.23694).toFixed(1);
-    const avgSpeedMph = (activity.average_speed * 2.23694).toFixed(1);
+    // Map activity data to the specific columns we have in the sheet
+    const row = new Array(lastCol).fill('');
     
-    const temp = activity.average_temp || '';
-    const desc = activity.description || '';
-    
-    const achieveCount = activity.achievement_count || 0;
-    const kudosCount = activity.kudos_count || 0;
-    const commentCount = activity.comment_count || 0;
+    const set = (header, val) => {
+      const idx = headerMap[header];
+      if (idx !== undefined) row[idx] = val;
+    };
 
-    // Gear
-    let bike = '';
-    let shoes = '';
+    set('Activity ID', String(activity.id));
+    set('Name', activity.name);
+    set('Type', activity.type);
+    set('Distance (mi)', (activity.distance * 0.000621371).toFixed(2));
+    set('Elevation (ft)', activity.total_elevation_gain ? (activity.total_elevation_gain * 3.28084).toFixed(0) : 0);
+    set('Moving Time', formatTime(activity.moving_time));
+    set('Elapsed Time', formatTime(activity.elapsed_time));
+    set('Start Date', activity.start_date_local);
+    set('Max Speed (mph)', (activity.max_speed * 2.23694).toFixed(1));
+    set('Avg Speed (mph)', (activity.average_speed * 2.23694).toFixed(1));
+    set('Calories', activity.calories || '');
+    set('Description', activity.description || '');
+    set('Temp (C)', activity.average_temp || '');
+    set('Achievement Count', activity.achievement_count || 0);
+    set('Kudos Count', activity.kudos_count || 0);
+    set('Comment Count', activity.comment_count || 0);
+    
+    // Gear Logic
     const gearName = activity.gear ? activity.gear.name : '';
     const bikeTypes = ['Ride', 'VirtualRide', 'EBikeRide', 'GravelRide', 'MountainBikeRide'];
-    if (bikeTypes.includes(activity.type)) {
-      bike = gearName;
-    } else {
-      shoes = gearName;
-    }
+    if (bikeTypes.includes(activity.type)) set('Bike', gearName);
+    else set('Shoes', gearName);
 
-    // Results
+    // Results/Photos
+    set('Photos', photoUrls.join(', \n'));
+    
+    // Results extraction
     let results = '';
     if (activity.segment_efforts && Array.isArray(activity.segment_efforts)) {
-      const achievementsList = [];
+      const achievements = [];
       activity.segment_efforts.forEach(effort => {
-        if (effort.achievements && effort.achievements.length > 0) {
-          effort.achievements.forEach(a => {
-            let typeName = a.type_descr;
-            if (!typeName) {
-                if (a.type === 'pr') typeName = 'PR';
-                else if (a.type === 'overall') typeName = 'KoM/QoM';
-                else if (a.type === 'year_overall') typeName = 'Year Best';
-                else typeName = a.type || 'Achievement';
-            }
-            if (a.rank && a.rank > 1) {
-                typeName += ` (${a.rank})`;
-            }
-            achievementsList.push(`${typeName}: ${effort.name}`);
-          });
+        if (effort.achievements) {
+          effort.achievements.forEach(a => achievements.push(`${a.type_descr || a.type}: ${effort.name}`));
         }
       });
-      results = achievementsList.join('; ');
-    } else if (activity.achievements && activity.achievements.length > 0) {
-       results = activity.achievements.map(a => a.type || 'Award').join(', ');
+      results = achievements.join('; ');
+    }
+    set('Results', results);
+
+    // Link
+    const link = `https://www.strava.com/activities/${activity.id}`;
+    if (headerMap['Strava Link'] !== undefined) set('Strava Link', link);
+    else if (headerMap['URL ID'] !== undefined) set('URL ID', link);
+    else {
+      // If neither exists, we'll append it to the row and update headerMap for subsequent rows
+      row.push(link);
     }
 
-    newRows.push([
-      String(activity.id),
-      activity.name,
-      activity.type,
-      distanceMi,
-      elevationFt,
-      movingTime,
-      elapsedTime,
-      activity.start_date_local,
-      maxSpeedMph,
-      avgSpeedMph,
-      activity.calories || '',
-      desc,
-      temp,
-      achieveCount, 
-      kudosCount, 
-      commentCount, 
-      bike,
-      shoes,
-      results,
-      photosCell
-    ]);
+    newRows.push(row);
   }
 
   if (newRows.length > 0) {
+    // Check if we grew the row length (added a missing Link column)
+    if (newRows[0].length > lastCol) {
+       console.log("Adding missing Strava Link column header...");
+       sheet.getRange(1, lastCol + 1).setValue('Strava Link');
+    }
     sheet.getRange(lastRow + 1, 1, newRows.length, newRows[0].length).setValues(newRows);
     SpreadsheetApp.flush();
-    console.log(`Added ${newRows.length} new activities.`);
   }
   
   return newRows.length;
@@ -316,5 +335,68 @@ function deleteTrigger(funcName) {
     if (trigger.getHandlerFunction() === funcName) {
       ScriptApp.deleteTrigger(trigger);
     }
+  }
+}
+
+/**
+ * BACKFILL TOOL: Adds Strava Links to existing records.
+ * Specifically handles the ~400 records already in the sheet.
+ */
+function backfillStravaLinks() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(TARGET_SHEET_NAME);
+  if (!sheet) {
+    alertUser(`Sheet '${TARGET_SHEET_NAME}' not found.`);
+    return;
+  }
+
+  const lastRow = sheet.getLastRow();
+  const lastCol = sheet.getLastColumn();
+  
+  if (lastRow < 2) {
+    alertUser("No data to backfill.");
+    return;
+  }
+
+  // Detect Columns
+  const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  const idColIndex = headers.indexOf('Activity ID');
+  let linkColIndex = headers.indexOf('Strava Link');
+  if (linkColIndex === -1) linkColIndex = headers.indexOf('URL ID'); // Handle manual column
+
+  if (idColIndex === -1) {
+    alertUser("Could not find 'Activity ID' column.");
+    return;
+  }
+  
+  if (linkColIndex === -1) {
+    console.log("Adding 'Strava Link' header...");
+    linkColIndex = lastCol; 
+    sheet.getRange(1, linkColIndex + 1).setValue('Strava Link');
+  }
+
+  // 2. Read IDs and Existing Links
+  const idData = sheet.getRange(2, idColIndex + 1, lastRow - 1, 1).getValues(); 
+  const linkData = sheet.getRange(2, linkColIndex + 1, lastRow - 1, 1).getValues();
+  
+  const updates = [];
+  let count = 0;
+
+  for (let i = 0; i < idData.length; i++) {
+    const activityId = String(idData[i][0]);
+    const currentLink = linkData[i][0];
+
+    if (activityId && activityId !== "" && !currentLink) {
+      updates.push([`https://www.strava.com/activities/${activityId}`]);
+      count++;
+    } else {
+      updates.push([currentLink]); 
+    }
+  }
+
+  if (count > 0) {
+    sheet.getRange(2, linkColIndex + 1, updates.length, 1).setValues(updates);
+    alertUser(`Successfully backfilled ${count} Strava Links.`);
+  } else {
+    alertUser("No links needed backfilling.");
   }
 }

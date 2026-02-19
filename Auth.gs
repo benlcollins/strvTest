@@ -26,16 +26,20 @@ function getAccessToken() {
 
 /**
  * Refreshes the access token using the stored refresh token.
- * Updated to use UrlFetchApp as per spec.
+ * Handles token rotation by storing new refresh tokens if provided.
  * 
  * @return {string} New access token.
  */
 function refreshAccessToken() {
+  const props = PropertiesService.getScriptProperties();
+  // Prioritize the stored refresh token (from rotation) over the hardcoded one
+  const currentRefreshToken = props.getProperty('refresh_token') || STRAVA_REFRESH_TOKEN;
+  
   const url = 'https://www.strava.com/oauth/token';
   const payload = {
     client_id: STRAVA_CLIENT_ID,
     client_secret: STRAVA_CLIENT_SECRET,
-    refresh_token: STRAVA_REFRESH_TOKEN,
+    refresh_token: currentRefreshToken,
     grant_type: 'refresh_token'
   };
   
@@ -49,12 +53,17 @@ function refreshAccessToken() {
     const data = JSON.parse(response.getContentText());
     
     if (data.access_token) {
-      const props = PropertiesService.getScriptProperties();
       props.setProperty('access_token', data.access_token);
       
       // Store expiration time if provided
       if (data.expires_at) {
         props.setProperty('expires_at', String(data.expires_at));
+      }
+
+      // HANDLE TOKEN ROTATION: Store the new refresh token if provided
+      if (data.refresh_token) {
+        console.log('New refresh token received. Updating...');
+        props.setProperty('refresh_token', data.refresh_token);
       }
       
       return data.access_token;
