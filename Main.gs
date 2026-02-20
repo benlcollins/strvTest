@@ -115,26 +115,30 @@ function runBatchSync() {
         return;
       }
       
-      const count = processActivities(activities);
+      const result = processActivities(activities);
+      const count = result.processed;
       totalNewActivitiesFound += count;
       pagesProcessedInThisRun++;
-      currentPage++; 
+      
+      if (!result.hasMoreOnPage) {
+        currentPage++; 
+      }
 
       if (count > 0) {
         console.log(`Found ${count} new activities. Stopping loop to process next batch.`);
         break;
       } else {
-        console.log(`Page ${currentPage - 1} skipped (Duplicates).`);
+        console.log(`Page ${currentPage - (result.hasMoreOnPage ? 0 : 1)} skipped (Duplicates).`);
       }
     }
     
     props.setProperty('SYNC_CURSOR_PAGE', String(currentPage));
-    const waitTime = (totalNewActivitiesFound === 0) ? 1 : 10;
+    const waitTime = (totalNewActivitiesFound === 0) ? 1 : 15;
     createTrigger('runBatchSync', waitTime); 
     
     const msg = (totalNewActivitiesFound === 0) 
       ? `Skipped ${pagesProcessedInThisRun} pages of history. Continuing in 1 min...`
-      : `Added ${totalNewActivitiesFound} new activities. Next batch in 10 mins.`;
+      : `Added ${totalNewActivitiesFound} new activities. Next batch in 15 mins.`;
     
     alertUser(msg);
 
@@ -157,8 +161,8 @@ function testSync() {
     const activities = fetchActivities(1, 5); 
     
     if (activities && activities.length > 0) {
-      const count = processActivities(activities);
-      alertUser(`Test Sync Complete. Processed ${count} new activities.`);
+      const result = processActivities(activities);
+      alertUser(`Test Sync Complete. Processed ${result.processed} new activities.`);
     } else {
       alertUser('Test Sync: No activities found.');
     }
@@ -224,10 +228,17 @@ function processActivities(activities) {
     existingIds = values.flat().map(String);
   }
 
-  const newActivities = activities.filter(a => !existingIds.includes(String(a.id)));
+  let newActivities = activities.filter(a => !existingIds.includes(String(a.id)));
   
   if (newActivities.length === 0) {
-    return 0;
+    return { processed: 0, hasMoreOnPage: false };
+  }
+
+  const MAX_ACTIVITIES_PER_RUN = 40;
+  const hasMoreOnPage = newActivities.length > MAX_ACTIVITIES_PER_RUN;
+  if (hasMoreOnPage) {
+    console.log(`Found ${newActivities.length} total new activities, limiting this run to ${MAX_ACTIVITIES_PER_RUN} to avoid rate limits.`);
+    newActivities = newActivities.slice(0, MAX_ACTIVITIES_PER_RUN);
   }
 
   const activityIds = newActivities.map(a => a.id);
@@ -310,7 +321,7 @@ function processActivities(activities) {
     SpreadsheetApp.flush();
   }
   
-  return newRows.length;
+  return { processed: newRows.length, hasMoreOnPage: hasMoreOnPage };
 }
 
 function formatTime(seconds) {
