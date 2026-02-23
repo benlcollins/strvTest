@@ -34,6 +34,7 @@ function onOpen() {
   const ui = SpreadsheetApp.getUi();
   ui.createMenu('Strava Tools')
       .addItem('Sync Now (Fast Parallel)', 'runBatchSync') 
+      .addItem('Setup Daily Auto-Sync', 'setupDailySync')
       .addItem('Test Sync (First 5)', 'testSync')
       .addSeparator()
       .addItem('Debug: Recent Activity JSON', 'debugActivityJSON')
@@ -317,7 +318,15 @@ function processActivities(activities) {
        console.log("Adding missing Strava Link column header...");
        sheet.getRange(1, lastCol + 1).setValue('Strava Link');
     }
-    sheet.getRange(lastRow + 1, 1, newRows.length, newRows[0].length).setValues(newRows);
+    
+    // Insert new rows below the header to ensure newest activities are at the top
+    if (lastRow > 1) {
+      sheet.insertRowsBefore(2, newRows.length);
+    } else {
+      sheet.insertRowsAfter(1, newRows.length);
+    }
+    
+    sheet.getRange(2, 1, newRows.length, newRows[0].length).setValues(newRows);
     SpreadsheetApp.flush();
   }
   
@@ -410,4 +419,43 @@ function backfillStravaLinks() {
   } else {
     alertUser("No links needed backfilling.");
   }
+}
+
+/**
+ * Daily trigger target. Checks only the most recent activities.
+ */
+function runDailySync() {
+  console.log("Running scheduled daily sync.");
+  
+  // Check page 1 for the most recent activities.
+  const activities = fetchActivities(1, BATCH_SIZE);
+  if (!activities || activities.length === 0) {
+    console.log("No activities found in daily sync.");
+    return;
+  }
+  
+  const result = processActivities(activities);
+  console.log(`Daily sync processed ${result.processed} new activities.`);
+  
+  // Hand off to batch sync if there's an unusually high number of new activities (> 40)
+  if (result.hasMoreOnPage) {
+    console.log("More than 40 new activities found. Handing off to batch sync...");
+    PropertiesService.getScriptProperties().setProperty('SYNC_CURSOR_PAGE', '1');
+    createTrigger('runBatchSync', 15);
+  }
+}
+
+/**
+ * Sets up a daily trigger to run the sync automatically every night.
+ */
+function setupDailySync() {
+  deleteTrigger('runDailySync'); // Prevent duplicate triggers
+  
+  ScriptApp.newTrigger('runDailySync')
+      .timeBased()
+      .atHour(2) // Run between 2 AM and 3 AM
+      .everyDays(1) 
+      .create();
+      
+  alertUser('Daily auto-sync enabled! It will run automatically between 2 AM and 3 AM every day.');
 }
